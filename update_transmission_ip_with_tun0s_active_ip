@@ -1,0 +1,140 @@
+#!/bin/bash
+
+############################################################################################################
+#A script to update the transmission bind-address-ipv4 value with the active tun0 IP from NordVPN.
+#
+#This script:
+#
+#       - Hard codes the transmission-daemon settings.json path
+#       - Grabs the "bind-address-ipv4" line from the settings.json file
+#       - Grabs the active IP on NordVPNs tun0 iface
+#       - exits if there is no ip on tun0 iface and logs an error
+#       - compares the settings.json ip with the tun0 ip:
+#               If theyre different:
+#                       - stops the transmission-daemon service
+#                       - updates settings.json line "bind-address-ipv4" with the tun0 IP
+#                       - starts the ransmission-daemon service
+#                       - logs the change as local0.info and exits cleanly
+#               If theyre the same:
+#                       - logs the match as local0.info and exits cleanly
+############################################################################################################
+# Called via the simple service:
+#
+# NAME: /etc/systemd/system/update-transd-wnordvpnip.service
+#
+#[Unit]
+#Description=Run script to update transmission config with nordvpn IP after nordvpnd.service has connected
+#Requires=nordvpnd.service
+#After=transmission-daemon.service
+#
+#[Service]
+#Type=simple
+#RemainAfterExit=yes
+#ExecStart=/usr/local/bin/update_transmission_with_vpnip.sh
+#Restart=on-failure
+#RestartSec=10
+#KillMode=process
+#
+#[Install]
+#WantedBy=multi-user.target
+#/etc/systemd/system/update-transd-wnordvpnip.service
+############################################################################################################
+
+############################################################################################################
+# Define with the variables - these could be moved to script arguments in the future
+############################################################################################################
+# The transmission setttings file
+transconf="/var/lib/transmission/.config/transmission-daemon/settings.json"
+
+# locate the IP bind address and assign it
+transbindip=$(grep "bind-address-ipv4" ${transconf})
+
+# Get the ipv4 address of vpn tun0:
+tunip=$(ifconfig tun0 | grep 'inet' | awk '{print $2}')
+
+############################################################################################################
+# Define the functions of the script
+############################################################################################################
+check_service_response(){
+
+        if [ $? == 0 ]; then
+                printf "\n$1 service $2"
+        else
+                printf "\n$1 service failed $2, exiting...\n\n"
+                logger -p local0.err "transmission-ip-update : Failed to $2 the $1 service"
+                exit 2
+        fi
+}
+
+change_service_state(){
+
+        if [ $(systemctl is-active $1)  == "active" ]; then
+		
+                printf "\nStopping the $1 service...\n\n"
+                systemctl stop $1
+                check_service_response transmission-daemon 'stop'
+				
+        else
+		
+                printf "\nStarting the $1 service...\n\n"
+                systemctl start $1
+                check_service_response transmission-daemon 'start'
+				
+        fi
+}
+
+update_transd_bindip(){
+        change_service_state transmission-daemon
+
+        printf "\nUpdating the $transconf file with the new IP $tunip\n\n"
+        # update the $transconf with the $tunip
+        sed -i "s/\"bind-address-ipv4\": \".*\",/\"bind-address-ipv4\": \"$tunip\",/g" ${transconf}
+
+        # start the transmission-daemon service
+        change_service_state transmission-daemon
+}
+
+eval_and_update_transdbindip(){
+        # If there is not tun0 IP then log the error and wait 5 mins
+        if [[ ${tunip} == "" || ${tunip} == "0.0.0.0"  ]]; then
+
+                printf "\nThere is no IP assigned to tun0\n\n"
+                # Log the failure as an error and exit on code 2
+                logger -p local0.err "transmission-ip-update : NordVPNs tun0 interface has no IP assigned"
+
+        # if the transmission-daemon ipv4bindIP is the same as the tun0 IP on the VPN just log and wait 5 mins
+        elif  [ "${transbindip}" == "    \"bind-address-ipv4\": \"${tunip}\"," ]; then
+
+                printf "\nThe Transmission daemon and tun0 IP match\n\n"
+                logger -p local0.info "transmission-ip-update : NordVPNs tun0 ip ${tunip} matches the file (${transconf} = ${transbindip})"
+
+        # if the transmission-daemon ipv4bindIP is not the same as the tun0 IPs then update the config and service
+        elif [ "${transbindip}" != "    \"bind-address-ipv4\": \"${tunip}\"," ]; then
+
+                printf "\nThe transmission-daemon $transbindip does not match $tunip\n\n"
+                logger -p local0.info "transmission-ip-update : new tun0 IP ${tunip} discovered, updating ${transconf}"
+                update_transd_bindip
+
+        fi
+}
+
+############################################################################################################
+# Main Section, 5 minute infinite while loop calling functions & resetting $tunip variable
+############################################################################################################
+while true; do
+
+	# First refresh the $tunip & $transbindip variables with the latest values
+	tunip=$(ifconfig tun0 | grep 'inet' | awk '{print $2}')
+	transbindip=$(grep "bind-address-ipv4" ${transconf})
+
+	# Then call the function to compare the tun0 iface IP ($tunip) with the
+	# transmission-daemon settings.json bind ipv4 ($transbindip) and take action
+	eval_and_update_transdbindip
+
+	# Then sleep for 5 mins and repeat these checks forever
+	sleep 5m
+
+done
+############################################################################################################
+# END
+############################################################################################################
