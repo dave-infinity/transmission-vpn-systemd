@@ -1,0 +1,16 @@
+[Unit]
+Description=Private Internet Access VPN Port Binder
+After=network-online.target openvpn-client@client.service
+Wants=network-online.target
+#Requires=openvpn-client@client.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pia-vpn-portbinder.sh
+EnvironmentFile=/etc/systemdenvs/pia-vpn-portbinder.env
+Restart=always
+RestartSec=30
+User=root
+
+[Install]
+WantedBy=multi-user.target
